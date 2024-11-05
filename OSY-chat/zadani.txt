@@ -1,0 +1,13 @@
+Zadání
+
+Upravte si programy z přípravy, tak aby program fungoval jako chat.
+
+1. Klient pošle na začátku svůj nick jako "#nick jmeno" Bez přezdívky server klienta ignoruje. 
+Server bude udržovat seznam připojených klientů jako socket a jméno klienta. Každý klient může požádat server o seznam připojených klientů pomocí "#list" 
+Zprávy odesílejte i se jménem odesílatele. 
+
+Pro odpojování klientů použijte rouru. Vlákno, které končí pošle touto rourou svůj socket.
+
+Hlavní vlákno bude z této roury číst (i ze stdin i čekat socket_listen). Když přečte socket odchozího klienta, tak si ho najde v seznamu a odstraní ho.
+
+2. Klient bude v případě nečinnosti posílat zprávu "sleeping...."
