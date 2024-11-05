@@ -4,9 +4,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <errno.h>
+
 
 #define STR_CLOSE "close"
 #define LOG_ERROR 0

@@ -2,13 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <poll.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <errno.h>
 #include <netdb.h>
 #include <time.h>
 
