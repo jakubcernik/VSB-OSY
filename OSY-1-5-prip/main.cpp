@@ -31,7 +31,6 @@ int main() {
             perror("open");
             exit(1);
         }
-        
 
         dup2(input, STDIN_FILENO);
         close(input);
