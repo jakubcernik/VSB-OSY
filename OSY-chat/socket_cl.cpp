@@ -10,12 +10,16 @@
 
 #define STR_CLOSE "close"
 #define TIMEOUT_MS 150000  // Timeout 150 sekund
+#define NICK_TIMEOUT 200000  // Timeout pro zadání přezdívky (200 sekund)
 
-#define LOG_ERROR 0       // errors
-#define LOG_INFO  1       // information and notifications
-#define LOG_DEBUG 2       // debug messages
+#define LOG_ERROR 0
+#define LOG_INFO  1
+#define LOG_DEBUG 2
 
 int g_debug = LOG_INFO;
+char nickname[50];  // Přezdívka klienta
+char last_message[128];  // Uchová poslední odeslanou zprávu
+
 
 void log_msg(int log_level, const char *format, ...) {
     const char *out_fmt[] = {
@@ -33,15 +37,6 @@ void log_msg(int log_level, const char *format, ...) {
     va_end(args);
 
     fprintf(log_level == LOG_ERROR ? stderr : stdout, out_fmt[log_level], buffer);
-}
-
-void generate_random_expression(char *buffer, size_t size) {
-    int num1 = rand() % 100;
-    int num2 = rand() % 100 + 1;
-    char operators[] = "+-*/";
-    char op = operators[rand() % 4];
-
-    snprintf(buffer, size, "%d %c %d\n", num1, op, num2);
 }
 
 void help(const char *program_name) {
@@ -103,6 +98,32 @@ int main(int argc, char **argv) {
 
     log_msg(LOG_INFO, "Connected to server.");
 
+    // Vyžádání přezdívky od uživatele s timeoutem 20 sekund
+    printf("Please enter your nickname (format: #nick <name>): ");
+    fflush(stdout);
+
+    pollfd nick_poll = {STDIN_FILENO, POLLIN, 0};
+    int poll_result = poll(&nick_poll, 1, NICK_TIMEOUT);
+    if (poll_result == 0) {
+        log_msg(LOG_INFO, "Nickname entry timed out. Disconnecting...");
+        close(server_socket);
+        return 0;
+    } else if (poll_result < 0) {
+        log_msg(LOG_ERROR, "Error while waiting for nickname.");
+        close(server_socket);
+        return 1;
+    }
+
+    int length = read(STDIN_FILENO, nickname, sizeof(nickname) - 1);
+    if (length <= 0 || strncmp(nickname, "#nick ", 6) != 0) {
+        log_msg(LOG_INFO, "Invalid nickname format. Disconnecting...");
+        close(server_socket);
+        return 0;
+    }
+
+    nickname[length] = '\0';
+    write(server_socket, nickname, length);
+
     pollfd poll_fds[2];
     poll_fds[0].fd = STDIN_FILENO;
     poll_fds[0].events = POLLIN;
@@ -122,29 +143,29 @@ int main(int argc, char **argv) {
         }
 
         if (poll_result == 0) {
-            generate_random_expression(buffer, sizeof(buffer));
-            log_msg(LOG_INFO, "No input detected. Sending generated expression: %s", buffer);
-
-            if (write(server_socket, buffer, strlen(buffer)) < 0) {
-                log_msg(LOG_ERROR, "Unable to send data to server.");
-                break;
-            }
+            snprintf(buffer, sizeof(buffer), "sleeping...\n");
+            write(server_socket, buffer, strlen(buffer));
             continue;
         }
 
         if (poll_fds[0].revents & POLLIN) {
             int data_length = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
-            if (data_length < 0) {
+            if (data_length <= 0) {
                 log_msg(LOG_ERROR, "Unable to read from stdin.");
                 break;
             }
 
             buffer[data_length] = '\0';
 
-            if (write(server_socket, buffer, data_length) < 0) {
-                log_msg(LOG_ERROR, "Unable to send data to server.");
-                break;
+            // Odebereme koncové zalomení řádku
+            if (buffer[data_length - 1] == '\n') {
+                buffer[data_length - 1] = '\0';
             }
+
+            strncpy(last_message, buffer, sizeof(last_message));  // Uložíme čistý text zprávy
+            write(server_socket, buffer, strlen(buffer));
+
+            printf("%s\n", buffer);  // Výpis odeslané zprávy bez jména
         }
 
         if (poll_fds[1].revents & POLLIN) {
@@ -155,9 +176,13 @@ int main(int argc, char **argv) {
             }
 
             buffer[data_length] = '\0';
-            log_msg(LOG_INFO, "Received from server: %s", buffer);
-            write(STDOUT_FILENO, buffer, data_length);
+
+            // Kontrola, jestli přijatá zpráva není totožná s poslední odeslanou zprávou
+            if (strcmp(buffer, last_message) != 0) {
+                printf("%s", buffer);  // Zobrazí zprávu bez dodatečného '\n'
+            }
         }
+
     }
 
     close(server_socket);

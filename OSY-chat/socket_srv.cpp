@@ -9,7 +9,12 @@
 #include <vector>
 #include <algorithm>
 #include <mutex>
-
+#include <unordered_map>
+#include <string>
+#include <fcntl.h>
+#include <poll.h>
+#include <ctime>
+#include <sstream>
 
 #define STR_CLOSE "close"
 #define LOG_ERROR 0
@@ -17,17 +22,27 @@
 #define LOG_DEBUG 2
 
 int g_debug = LOG_INFO;
-
-// Shared structures
-std::vector<int> client_sockets;
+std::unordered_map<int, std::string> client_nicks;
 std::mutex client_mutex;
+int pipe_fd[2];
 
-void broadcast_message(const char *message) {
+void broadcast_message(const std::string& sender, std::string message, bool include_sender = false) {
     std::lock_guard<std::mutex> lock(client_mutex);
-    for (int sock : client_sockets) {
-        write(sock, message, strlen(message));
+
+    // Odebereme koncový '\n', pokud je přítomen, abychom předešli zdvojení řádků
+    if (!message.empty() && message.back() == '\n') {
+        message.pop_back();
+    }
+
+    std::string formatted_message = sender + ": " + message + "\n";  // Přidáme '\n' na konec zprávy
+    for (const auto& [sock, nick] : client_nicks) {
+        if (!include_sender && sender == nick) continue;  // Neodesílat zpět odesílateli
+        write(sock, formatted_message.c_str(), formatted_message.size());
     }
 }
+
+
+
 
 void log_msg(int log_level, const char *format, ...) {
     const char *prefix[] = { "ERR: ", "INF: ", "DEB: " };
@@ -42,75 +57,62 @@ void log_msg(int log_level, const char *format, ...) {
     fprintf(log_level == LOG_ERROR ? stderr : stdout, "%s%s\n", prefix[log_level], buffer);
 }
 
-int calculator(const char *expression, char *response) {
-    int num1, num2, result;
-    char op;
-
-    if (sscanf(expression, "%d %c %d", &num1, &op, &num2) != 3) {
-        snprintf(response, 256, "Invalid expression format. Use format: <number> <operator> <number>\n");
-        return -1;
-    }
-
-    switch (op) {
-        case '+': result = num1 + num2; break;
-        case '-': result = num1 - num2; break;
-        case '*': result = num1 * num2; break;
-        case '/':
-            if (num2 == 0) {
-                snprintf(response, 256, "Error: Division by zero.\n");
-                return -1;
-            }
-            result = num1 / num2;
-            break;
-        default:
-            snprintf(response, 256, "Invalid operator. Use +, -, *, or /.\n");
-            return -1;
-    }
-
-    snprintf(response, 256, "%d %c %d = %d\n", num1, op, num2, result);
-    return 0;
-}
-
-// Funkce pro obsluhu klienta ve vláknu
+// Funkce pro obsluhu klienta
 void *client_handler(void *arg) {
     int client_socket = *(int *)arg;
     free(arg);
 
-    char buffer[256], response[256];
+    char buffer[256];
+    std::string client_nick;
+    bool nick_set = false;
+
     while (1) {
         int length = read(client_socket, buffer, sizeof(buffer) - 1);
         if (length <= 0) break;
-
         buffer[length] = '\0';
-        log_msg(LOG_INFO, "Received from client %d: %s", client_socket, buffer);
 
-        if (strncmp(buffer, STR_CLOSE, strlen(STR_CLOSE)) == 0) break;
+        if (!nick_set) {
+            if (strncmp(buffer, "#nick ", 6) == 0) {
+                client_nick = std::string(buffer + 6, length - 6);
+                nick_set = true;
 
-        if (buffer[length - 1] != '\n') {
-            snprintf(response, sizeof(response), "Error: Expression must end with newline '\\n'\n");
-        } else if (calculator(buffer, response) != 0) {
-            snprintf(response, sizeof(response), "Invalid expression format or operator.\n");
+                {
+                    std::lock_guard<std::mutex> lock(client_mutex);
+                    client_nicks[client_socket] = client_nick;
+                }
+                broadcast_message(client_nick, " has joined the chat.", true);
+            } else {
+                log_msg(LOG_INFO, "Client ignored without nickname.");
+                continue;
+            }
+        } else if (strcmp(buffer, "#list\n") == 0) {
+            std::string list_message = "Connected users:\n";
+            {
+                std::lock_guard<std::mutex> lock(client_mutex);
+                for (const auto& [sock, nick] : client_nicks) {
+                    list_message += " - " + nick + "\n";
+                }
+            }
+            write(client_socket, list_message.c_str(), list_message.size());
+        } else {
+            broadcast_message(client_nick, buffer, false);
         }
-
-        // Broadcast výsledku všem klientům
-        broadcast_message(response);
     }
 
-    // Odebrání klienta ze seznamu
     {
         std::lock_guard<std::mutex> lock(client_mutex);
-        client_sockets.erase(std::remove(client_sockets.begin(), client_sockets.end(), client_socket), client_sockets.end());
+        client_nicks.erase(client_socket);
     }
+    broadcast_message(client_nick, " has left the chat.", true);
 
+    write(pipe_fd[1], &client_socket, sizeof(client_socket));
     close(client_socket);
     return NULL;
 }
 
+
 void help(const char *program_name) {
     printf("Usage: %s [-d] <port>\n", program_name);
-    printf("Options:\n");
-    printf("  -d  Enable debug mode\n");
-    printf("  -h  Show help\n");
     exit(0);
 }
 
@@ -120,13 +122,12 @@ int main(int argc, char **argv) {
     int server_port = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-d") == 0) g_debug = LOG_DEBUG;
-        else if (strcmp(argv[i], "-h") == 0) help(argv[0]);
         else server_port = atoi(argv[i]);
     }
 
-    if (server_port <= 0) {
-        log_msg(LOG_ERROR, "Invalid or missing port number.");
-        help(argv[0]);
+    if (pipe(pipe_fd) < 0) {
+        perror("Pipe creation failed");
+        exit(1);
     }
 
     int listening_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -157,40 +158,54 @@ int main(int argc, char **argv) {
 
     log_msg(LOG_INFO, "Server listening on port %d", server_port);
 
+    pollfd poll_fds[2];
+    poll_fds[0].fd = listening_socket;
+    poll_fds[0].events = POLLIN;
+    poll_fds[1].fd = pipe_fd[0];
+    poll_fds[1].events = POLLIN;
+
     while (1) {
-        struct sockaddr_in client_address;
-        socklen_t client_len = sizeof(client_address);
-        int client_socket = accept(listening_socket, (struct sockaddr *)&client_address, &client_len);
+        int poll_result = poll(poll_fds, 2, -1);
 
-        if (client_socket == -1) {
-            log_msg(LOG_ERROR, "Accept failed.");
-            continue;
+        if (poll_result < 0) {
+            log_msg(LOG_ERROR, "Poll error.");
+            break;
         }
 
-        log_msg(LOG_INFO, "Connected: %s:%d",
-                inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port));
+        if (poll_fds[0].revents & POLLIN) {
+            struct sockaddr_in client_address;
+            socklen_t client_len = sizeof(client_address);
+            int client_socket = accept(listening_socket, (struct sockaddr *)&client_address, &client_len);
 
-        // Přidání klienta do seznamu
-        {
+            if (client_socket == -1) {
+                log_msg(LOG_ERROR, "Accept failed.");
+                continue;
+            }
+
+            pthread_t client_thread;
+            int *new_sock = (int *)malloc(sizeof(int));
+            *new_sock = client_socket;
+
+            if (pthread_create(&client_thread, NULL, client_handler, (void *)new_sock) < 0) {
+                log_msg(LOG_ERROR, "Could not create thread for client.");
+                close(client_socket);
+                continue;
+            }
+
+            pthread_detach(client_thread);
+        }
+
+        if (poll_fds[1].revents & POLLIN) {
+            int client_socket;
+            read(pipe_fd[0], &client_socket, sizeof(client_socket));
+
             std::lock_guard<std::mutex> lock(client_mutex);
-            client_sockets.push_back(client_socket);
+            client_nicks.erase(client_socket);
         }
-
-        // Vytvoření vlákna pro obsluhu klienta
-        pthread_t client_thread;
-        int *new_sock = (int *)malloc(sizeof(int));
-        *new_sock = client_socket;
-
-        if (pthread_create(&client_thread, NULL, client_handler, (void *)new_sock) < 0) {
-            log_msg(LOG_ERROR, "Could not create thread for client.");
-            close(client_socket);
-            continue;
-        }
-
-        // Odpojení hlavního vlákna od tohoto klientského vlákna
-        pthread_detach(client_thread);
     }
 
     close(listening_socket);
+    close(pipe_fd[0]);
+    close(pipe_fd[1]);
     return 0;
 }
