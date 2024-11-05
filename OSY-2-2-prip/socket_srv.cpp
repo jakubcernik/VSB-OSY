@@ -5,6 +5,10 @@
 #include <stdarg.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <vector>
+#include <algorithm>
+#include <mutex>
 
 
 #define STR_CLOSE "close"
@@ -13,6 +17,17 @@
 #define LOG_DEBUG 2
 
 int g_debug = LOG_INFO;
+
+// Shared structures
+std::vector<int> client_sockets;
+std::mutex client_mutex;
+
+void broadcast_message(const char *message) {
+    std::lock_guard<std::mutex> lock(client_mutex);
+    for (int sock : client_sockets) {
+        write(sock, message, strlen(message));
+    }
+}
 
 void log_msg(int log_level, const char *format, ...) {
     const char *prefix[] = { "ERR: ", "INF: ", "DEB: " };
@@ -56,7 +71,11 @@ int calculator(const char *expression, char *response) {
     return 0;
 }
 
-void handle_client(int client_socket) {
+// Funkce pro obsluhu klienta ve vláknu
+void *client_handler(void *arg) {
+    int client_socket = *(int *)arg;
+    free(arg);
+
     char buffer[256], response[256];
     while (1) {
         int length = read(client_socket, buffer, sizeof(buffer) - 1);
@@ -67,22 +86,24 @@ void handle_client(int client_socket) {
 
         if (strncmp(buffer, STR_CLOSE, strlen(STR_CLOSE)) == 0) break;
 
-        // Check buffer is ending '\n'
         if (buffer[length - 1] != '\n') {
             snprintf(response, sizeof(response), "Error: Expression must end with newline '\\n'\n");
-        } else {
-            // Evaluating expression
-            if (calculator(buffer, response) != 0) {
-                snprintf(response, sizeof(response), "Invalid expression format or operator.\n");
-            }
+        } else if (calculator(buffer, response) != 0) {
+            snprintf(response, sizeof(response), "Invalid expression format or operator.\n");
         }
 
-        // Sending response to client
-        write(client_socket, response, strlen(response));
+        // Broadcast výsledku všem klientům
+        broadcast_message(response);
+    }
+
+    // Odebrání klienta ze seznamu
+    {
+        std::lock_guard<std::mutex> lock(client_mutex);
+        client_sockets.erase(std::remove(client_sockets.begin(), client_sockets.end(), client_socket), client_sockets.end());
     }
 
     close(client_socket);
-    exit(0);
+    return NULL;
 }
 
 void help(const char *program_name) {
@@ -149,16 +170,25 @@ int main(int argc, char **argv) {
         log_msg(LOG_INFO, "Connected: %s:%d",
                 inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port));
 
-        pid_t pid = fork();
-        if (pid < 0) {
-            log_msg(LOG_ERROR, "Fork failed.");
-            close(client_socket);
-        } else if (pid == 0) { // Child process
-            close(listening_socket);
-            handle_client(client_socket);
-        } else {
-            close(client_socket); // Parent process closes client socket
+        // Přidání klienta do seznamu
+        {
+            std::lock_guard<std::mutex> lock(client_mutex);
+            client_sockets.push_back(client_socket);
         }
+
+        // Vytvoření vlákna pro obsluhu klienta
+        pthread_t client_thread;
+        int *new_sock = (int *)malloc(sizeof(int));
+        *new_sock = client_socket;
+
+        if (pthread_create(&client_thread, NULL, client_handler, (void *)new_sock) < 0) {
+            log_msg(LOG_ERROR, "Could not create thread for client.");
+            close(client_socket);
+            continue;
+        }
+
+        // Odpojení hlavního vlákna od tohoto klientského vlákna
+        pthread_detach(client_thread);
     }
 
     close(listening_socket);

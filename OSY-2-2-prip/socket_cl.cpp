@@ -9,10 +9,7 @@
 #include <time.h>
 
 #define STR_CLOSE "close"
-#define TIMEOUT_MS 15000  // Timeout 15 sekund
-
-//***************************************************************************
-// log messages
+#define TIMEOUT_MS 150000  // Timeout 150 sekund
 
 #define LOG_ERROR 0       // errors
 #define LOG_INFO  1       // information and notifications
@@ -22,7 +19,7 @@ int g_debug = LOG_INFO;
 
 void log_msg(int log_level, const char *format, ...) {
     const char *out_fmt[] = {
-        "ERR: (%d-%s) %s\n",
+        "ERR: %s\n",
         "INF: %s\n",
         "DEB: %s\n"
     };
@@ -38,7 +35,6 @@ void log_msg(int log_level, const char *format, ...) {
     fprintf(log_level == LOG_ERROR ? stderr : stdout, out_fmt[log_level], buffer);
 }
 
-
 void generate_random_expression(char *buffer, size_t size) {
     int num1 = rand() % 100;
     int num2 = rand() % 100 + 1;
@@ -47,9 +43,6 @@ void generate_random_expression(char *buffer, size_t size) {
 
     snprintf(buffer, size, "%d %c %d\n", num1, op, num2);
 }
-
-//***************************************************************************
-// help
 
 void help(const char *program_name) {
     printf(
@@ -61,15 +54,12 @@ void help(const char *program_name) {
     exit(0);
 }
 
-//***************************************************************************
-
 int main(int argc, char **argv) {
     if (argc <= 2) help(argv[0]);
 
     int server_port = 0;
     char *server_host = nullptr;
 
-    // Parsing arguments
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-d")) g_debug = LOG_DEBUG;
         else if (!strcmp(argv[i], "-h")) help(argv[0]);
@@ -99,14 +89,12 @@ int main(int argc, char **argv) {
     client_address.sin_port = htons(server_port);
     freeaddrinfo(address_info_answer);
 
-    // Socket creation
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1) {
         log_msg(LOG_ERROR, "Unable to create socket.");
         exit(1);
     }
 
-    // Connect to server
     if (connect(server_socket, (sockaddr *)&client_address, sizeof(client_address)) < 0) {
         log_msg(LOG_ERROR, "Unable to connect to server.");
         close(server_socket);
@@ -115,7 +103,6 @@ int main(int argc, char **argv) {
 
     log_msg(LOG_INFO, "Connected to server.");
 
-    // Setup for poll with timeout
     pollfd poll_fds[2];
     poll_fds[0].fd = STDIN_FILENO;
     poll_fds[0].events = POLLIN;
@@ -127,7 +114,6 @@ int main(int argc, char **argv) {
     while (1) {
         char buffer[128];
         
-        // Check for user input or server response with a timeout
         int poll_result = poll(poll_fds, 2, TIMEOUT_MS);
 
         if (poll_result < 0) {
@@ -136,7 +122,6 @@ int main(int argc, char **argv) {
         }
 
         if (poll_result == 0) {
-            // Timeout reached, generate random expression
             generate_random_expression(buffer, sizeof(buffer));
             log_msg(LOG_INFO, "No input detected. Sending generated expression: %s", buffer);
 
@@ -147,7 +132,6 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        // If there is data on stdin
         if (poll_fds[0].revents & POLLIN) {
             int data_length = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
             if (data_length < 0) {
@@ -163,7 +147,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // If there is data from server
         if (poll_fds[1].revents & POLLIN) {
             int data_length = read(server_socket, buffer, sizeof(buffer) - 1);
             if (data_length <= 0) {
@@ -172,7 +155,8 @@ int main(int argc, char **argv) {
             }
 
             buffer[data_length] = '\0';
-            write(STDOUT_FILENO, buffer, data_length); // Printing data received from server
+            log_msg(LOG_INFO, "Received from server: %s", buffer);
+            write(STDOUT_FILENO, buffer, data_length);
         }
     }
 
